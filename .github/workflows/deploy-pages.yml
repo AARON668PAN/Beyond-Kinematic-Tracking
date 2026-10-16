@@ -1,0 +1,82 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Project Pages serve from /<repo>/, so the base path has to track the
+      # repository name — renaming the repo otherwise breaks every asset URL.
+      - name: Resolve base path
+        id: base
+        run: echo "name=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build static site
+        run: npm run build:pages
+        env:
+          GITHUB_PAGES: 'true'
+          NEXT_PUBLIC_BASE_PATH: /${{ steps.base.outputs.name }}
+
+      - name: Prepare Pages output
+        env:
+          REPO: ${{ steps.base.outputs.name }}
+        run: |
+          # assetPrefix makes vinext write assets to dist/client/<repo>/_next
+          # while the HTML references /<repo>/_next — and /<repo>/ is already
+          # the Pages site root, so that duplicated level has to be collapsed.
+          mv "dist/client/$REPO/_next" dist/client/_next
+          rmdir "dist/client/$REPO"
+          touch dist/client/.nojekyll
+          # Check index.html exists and every local asset it references landed.
+          test -f dist/client/index.html
+          grep -oiE "(src|srcset|href|poster)=\"/$REPO/[^\"]*\"" dist/client/index.html \
+            | sed -E "s|.*=\"/$REPO/([^\"]*)\"|\1|" | sort -u \
+            | while read -r f; do
+                test -e "dist/client/$f" || { echo "MISSING: $f"; exit 1; }
+              done
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist/client
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
